@@ -1,6 +1,6 @@
 cmake_minimum_required (VERSION 3.29)
 
-set (TEMPLATE_NAME "VulkanTutorial")
+set (TEMPLATE_NAME "VulkanSandbox")
 
 project (${TEMPLATE_NAME})
 
@@ -93,14 +93,6 @@ target_compile_definitions(${TEMPLATE_NAME} PRIVATE "VULKAN_HPP_HANDLE_ERROR_OUT
 if(WIN32)
   if(${CMAKE_GENERATOR} MATCHES "Visual Studio.*")
     set_target_properties(${TEMPLATE_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY ${TEMPLATE_DIR})
-  endif()
-elseif(APPLE)
-  if(${CMAKE_GENERATOR} MATCHES "Xcode")
-    set(CMAKE_XCODE_GENERATE_SCHEME ON)
-    set(CMAKE_XCODE_SCHEME_ENVIRONMENT
-      "VK_ICD_FILENAMES=$ENV{VULKAN_SDK}/share/vulkan/icd.d/MoltenVK_icd.json"
-      "VK_LAYER_PATH=$ENV{VULKAN_SDK}/share/vulkan/explicit_layer.d"
-    )
   endif()
 endif()
 
