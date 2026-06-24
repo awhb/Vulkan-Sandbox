@@ -7,6 +7,13 @@ project (${TEMPLATE_NAME})
 # Add option to enable/disable C++ 20 module
 option(ENABLE_CPP20_MODULE "Enable C++ 20 module support for Vulkan" OFF)
 
+# Add option to enable/disable Vulkan portability features
+set(VULKAN_PORTABILITY_FEATURES_DEFAULT OFF)
+if (APPLE)
+  set(VULKAN_PORTABILITY_FEATURES_DEFAULT ON)
+endif()
+option(ENABLE_VULKAN_PORTABILITY_FEATURES "Enable Vulkan portability features for MoltenVK" ${VULKAN_PORTABILITY_FEATURES_DEFAULT})
+
 # Enable C++ module dependency scanning only if C++ 20 module is enabled
 if(ENABLE_CPP20_MODULE)
   set(CMAKE_CXX_SCAN_FOR_MODULES ON)
@@ -76,7 +83,13 @@ find_program(SLANGC_EXECUTABLE slangc HINTS $ENV{VULKAN_SDK}/bin REQUIRED)
 
 set(TEMPLATE_DIR ${CMAKE_BINARY_DIR}/${TEMPLATE_NAME})
 
-add_executable (${TEMPLATE_NAME} main.cpp)
+set(SOURCES
+  src/main.cpp
+)
+add_executable (${TEMPLATE_NAME})
+target_sources(${TEMPLATE_NAME} PRIVATE ${SOURCES})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/" FILES ${SOURCES})
+
 set_target_properties (${TEMPLATE_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${TEMPLATE_DIR})
 set_target_properties (${TEMPLATE_NAME} PROPERTIES CXX_STANDARD 20)
 target_link_libraries (${TEMPLATE_NAME} Vulkan::cppm glfw)
@@ -87,32 +100,51 @@ if(ENABLE_CPP20_MODULE)
   target_compile_definitions(${TEMPLATE_NAME} PRIVATE USE_CPP20_MODULES=1)
 endif()
 
+# Add compile definition if Vulkan portability features are enabled
+if(ENABLE_VULKAN_PORTABILITY_FEATURES)
+  target_compile_definitions(${TEMPLATE_NAME} PRIVATE USE_VULKAN_PORTABILITY_FEATURES=1)
+endif()
+
 # Define VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS to treat VK_ERROR_OUT_OF_DATE_KHR as a success code
 target_compile_definitions(${TEMPLATE_NAME} PRIVATE "VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS" )
 
+# Set working directory for the executable to the template directory
 if(WIN32)
   if(${CMAKE_GENERATOR} MATCHES "Visual Studio.*")
     set_target_properties(${TEMPLATE_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY ${TEMPLATE_DIR})
   endif()
+elseif(APPLE)
+  if (${CMAKE_GENERATOR} MATCHES "Xcode")
+    set_target_properties(${TEMPLATE_NAME} PROPERTIES
+      XCODE_GENERATE_SCHEME TRUE
+      XCODE_SCHEME_WORKING_DIRECTORY "${TEMPLATE_DIR}"
+    )
+  endif()
 endif()
 
-
 # Slang shader
-set (SHADER_TARGET ${TEMPLATE_NAME}Shader)
+set (SHADER_TARGET Shaders)
+set (SHADER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set (SHADERS_DIR ${TEMPLATE_DIR}/shaders)
-set (SHADER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/shader.slang")
-set (ENTRY_POINTS -entry vertMain -entry fragMain)
 add_custom_command(OUTPUT ${SHADERS_DIR} COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADERS_DIR})
-add_custom_command(
-  OUTPUT  ${SHADERS_DIR}/slang.spv
-  COMMAND ${SLANGC_EXECUTABLE} ${SHADER_SOURCES} -target spirv -profile spirv_1_4 -emit-spirv-directly -fvk-use-entrypoint-name ${ENTRY_POINTS} -o ${TEMPLATE_DIR}/shaders/slang.spv
-  WORKING_DIRECTORY ${SHADERS_DIR}
-  DEPENDS ${SHADERS_DIR} ${SHADER_SOURCES}
-  COMMENT "Compiling Slang Shaders"
-  VERBATIM
-)
-add_custom_target(${SHADER_TARGET} DEPENDS ${SHADERS_DIR}/slang.spv)
+file(GLOB SHADER_SOURCES "${SHADER_SOURCE_DIR}/*.slang")
+
+foreach(SHADER_SOURCE ${SHADER_SOURCES})
+  get_filename_component(SHADER_NAME_WE "${SHADER_SOURCE}" NAME_WE)
+  set(SHADER_SPV "${SHADERS_DIR}/${SHADER_NAME_WE}.spv")
+  add_custom_command(
+    OUTPUT  ${SHADER_SPV}
+    COMMAND ${SLANGC_EXECUTABLE} ${SHADER_SOURCE} -target spirv -profile spirv_1_4 -emit-spirv-directly -o ${SHADER_SPV}
+    WORKING_DIRECTORY ${SHADERS_DIR}
+    DEPENDS ${SHADERS_DIR} ${SHADER_SOURCES}
+    COMMENT "Compiling Slang shader ${SHADER_NAME_WE}.slang"
+    VERBATIM
+  )
+  list(APPEND SHADER_SPVS ${SHADER_SPV})
+endforeach()
+add_custom_target(${SHADER_TARGET} DEPENDS ${SHADER_SPVS} SOURCES ${SHADER_SOURCES})
 add_dependencies(${TEMPLATE_NAME} ${SHADER_TARGET})
+source_group(TREE "${SHADER_SOURCE_DIR}" FILES ${SHADER_SOURCES})
 
 # Assets
 set (ASSET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/")
