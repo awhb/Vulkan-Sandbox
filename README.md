@@ -6,7 +6,7 @@ Vulkan rendering engine prototype made with `Vulkan 1.4`, meant as an iterative 
 * Vulkan-Hpp RAII bindings for Vulkan resource management
 * Validation layer support in debug builds
 * Dynamic rendering instead of render passes and framebuffers
-* Binary and timeline semaphores for GPU-CPU synchronization
+* Timeline semaphores for GPU-CPU synchronization instead of fences
 * Multiple frames in flight
 * Slang shader source compiled to SPIR-V as part of CMake build
 * CMake options for Vulkan portability support on MoltenVK/macOS and optional Vulkan C++20 module usage
