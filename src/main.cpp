@@ -15,6 +15,7 @@ import vulkan_hpp;
 
 #define GLFW_INCLUDE_VULKAN        // REQUIRED only for GLFW CreateWindowSurface.
 #include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
 
 const uint32_t WIDTH  = 800;
 const uint32_t HEIGHT = 600;
@@ -29,6 +30,40 @@ constexpr bool enableValidationLayers = false;
 #else
 constexpr bool enableValidationLayers = true;
 #endif
+
+struct Vertex
+{
+  glm::vec2 pos;
+  glm::vec3 color;
+  
+  static vk::VertexInputBindingDescription getBindingDescription()
+  {
+    return {
+      .binding = 0,
+      .stride = sizeof(Vertex),
+      .inputRate = vk::VertexInputRate::eVertex
+    };
+  }
+  
+  static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
+  {
+    return {{
+      {.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, pos)},
+      {.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}
+    }};
+  }
+};
+
+const std::vector<Vertex> vertices = {
+  {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+  {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+  {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+  {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+const std::vector<uint32_t> indices = {
+  0, 1, 2, 2, 3, 0
+};
 
 class Application
 {
@@ -60,6 +95,12 @@ private:
   
   vk::raii::PipelineLayout pipelineLayout = nullptr;
   vk::raii::Pipeline graphicsPipeline = nullptr;
+  
+  vk::raii::Buffer vertexBuffer = nullptr;
+  vk::raii::DeviceMemory vertexBufferMemory = nullptr;
+  vk::raii::Buffer indexBuffer = nullptr;
+  vk::raii::DeviceMemory indexBufferMemory = nullptr;
+  
   vk::raii::CommandPool commandPool = nullptr;
   std::vector<vk::raii::CommandBuffer> commandBuffers;
   
@@ -107,6 +148,8 @@ private:
     createImageViews();
     createGraphicsPipeline();
     createCommandPool();
+    createVertexBuffer();
+    createIndexBuffer();
     createCommandBuffers();
     createSyncObjects();
   }
@@ -142,14 +185,14 @@ private:
       glfwGetFramebufferSize(window, &width, &height);
       glfwWaitEvents();
     }
-
+    
     device.waitIdle();
-
+    
     cleanupSwapchain();
     createSwapchain();
     createImageViews();
-   }
-
+  }
+  
   void createInstance()
   {
     constexpr vk::ApplicationInfo appInfo{
@@ -159,45 +202,45 @@ private:
       .engineVersion = VK_MAKE_VERSION(1, 0, 0),
       .apiVersion = vk::ApiVersion14
     };
-
+    
     // Get required validation layers
     std::vector<const char*> layers;
     if (enableValidationLayers) {
       layers.assign(validationLayers.begin(), validationLayers.end());
     }
-
+    
     // Check if required layers are supported by Vulkan implementation
     auto layerProperties = context.enumerateInstanceLayerProperties();
     auto unsupportedLayerIt = std::ranges::find_if(
-      layers,
-      [&layerProperties](auto const &layer) {
-        return std::ranges::none_of(
-          layerProperties,
-          [layer](auto const &layerProperty) {
-            return strcmp(layerProperty.layerName, layer) == 0;
-          }
-        );
-    });
+                                                   layers,
+                                                   [&layerProperties](auto const &layer) {
+                                                     return std::ranges::none_of(
+                                                                                 layerProperties,
+                                                                                 [layer](auto const &layerProperty) {
+                                                                                   return strcmp(layerProperty.layerName, layer) == 0;
+                                                                                 }
+                                                                                 );
+                                                   });
     if (unsupportedLayerIt != layers.end()) {
       throw std::runtime_error("Required validation layer not supported: " + std::string(*unsupportedLayerIt));
     }
-
+    
     // Get required extensions
     auto extensions = getRequiredExtensions();
-
+    
     // Check if required extensions are supported by Vulkan implementation
     auto extensionProperties = context.enumerateInstanceExtensionProperties();
     auto unsupportedExtensionIt = std::ranges::find_if(
-      extensions,
-      [&extensionProperties](auto const &extension) {
-        return std::ranges::none_of(
-          extensionProperties,
-          [extension](auto const &extensionProperty) {
-            return strcmp(extensionProperty.extensionName, extension) == 0;
-          }
-        );
-      }
-    );
+                                                       extensions,
+                                                       [&extensionProperties](auto const &extension) {
+                                                         return std::ranges::none_of(
+                                                                                     extensionProperties,
+                                                                                     [extension](auto const &extensionProperty) {
+                                                                                       return strcmp(extensionProperty.extensionName, extension) == 0;
+                                                                                     }
+                                                                                     );
+                                                       }
+                                                       );
     if (unsupportedExtensionIt != extensions.end()) {
       throw std::runtime_error("Required extension not supported: " + std::string(*unsupportedExtensionIt));
     }
@@ -216,22 +259,22 @@ private:
       .enabledExtensionCount = static_cast<uint32_t>(extensions.size()),
       .ppEnabledExtensionNames = extensions.data()
     };
-      
+
     instance = vk::raii::Instance(context, createInfo);
   }
-
+  
   void setupDebugMessenger()
   {
     if (!enableValidationLayers) return;
     vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(
-      vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
-      vk::DebugUtilsMessageSeverityFlagBitsEXT::eError
-    );
+                                                        vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
+                                                        vk::DebugUtilsMessageSeverityFlagBitsEXT::eError
+                                                        );
     vk::DebugUtilsMessageTypeFlagsEXT messageTypeFlags(
-      vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
-      vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance |
-      vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation
-    );
+                                                       vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
+                                                       vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance |
+                                                       vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation
+                                                       );
     vk::DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT{
       .messageSeverity = severityFlags,
       .messageType = messageTypeFlags,
@@ -239,7 +282,7 @@ private:
     };
     debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
   }
-
+  
   void createSurface()
   {
     VkSurfaceKHR _surface; // C API Object
@@ -248,32 +291,32 @@ private:
     }
     surface = vk::raii::SurfaceKHR(instance, _surface); // promoted to C++ wrapper
   }
-
-
+  
+  
   void pickPhysicalDevice()
   {
     std::vector<vk::raii::PhysicalDevice> physicalDevices = instance.enumeratePhysicalDevices();
-
+    
     // Use an ordered map to automatically sort candidates by increasing score
     std::multimap<int, vk::raii::PhysicalDevice> candidates;
-
+    
     for (const auto& pd : physicalDevices) {
       auto deviceProperties = pd.getProperties();
       auto deviceFeatures = pd.getFeatures();
       uint32_t score = 0;
-
+      
       // Discrete GPUs have a significant performance advantage
       if (deviceProperties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu) {
         score += 1000;
       }
-
+      
       // Maximum possible size of textures affects graphics quality
       score += deviceProperties.limits.maxImageDimension2D;
-
+      
       if (!isDeviceSuitable(pd)) continue;
       candidates.insert(std::make_pair(score, pd));
     }
-
+    
     // Check if the best candidate is suitable at all
     if (!candidates.empty() && candidates.rbegin()->first > 0) {
       physicalDevice = candidates.rbegin()->second;
@@ -281,12 +324,12 @@ private:
       throw std::runtime_error("failed to find a suitable GPU!");
     }
   }
-
+  
   void createLogicalDevice()
   {
     // find the index of the first queue family that supports graphics
     std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
-
+    
     // get the first index into queueFamilyProperties which supports both graphics and presentation to window surface
     auto renderQueueFamilyIt = std::ranges::find_if(queueFamilyProperties,
                                                     [&](auto const &qfp) {
@@ -296,22 +339,22 @@ private:
       return supportsGraphics && supportsPresent;
     });
     assert(renderQueueFamilyIt != queueFamilyProperties.end() && "Could not find queue family for graphics and presentation!");
-
+    
     renderQueueIdx = static_cast<uint32_t>(std::distance(queueFamilyProperties.begin(), renderQueueFamilyIt));
-
+    
     // query for Vulkan 1.3 features
     vk::StructureChain<vk::PhysicalDeviceFeatures2,
-                       vk::PhysicalDeviceVulkan11Features,
-                       vk::PhysicalDeviceVulkan13Features,
-                       vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
-                       vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR> featureChain = {
+    vk::PhysicalDeviceVulkan11Features,
+    vk::PhysicalDeviceVulkan13Features,
+    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
+    vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR> featureChain = {
       {},
       {.shaderDrawParameters = true},
       {.synchronization2 = true, .dynamicRendering = true},
       {.extendedDynamicState = true},
       {.timelineSemaphore = true}
     };
-
+    
     // create a Device
     float queuePriority = 0.5f;
     vk::DeviceQueueCreateInfo deviceQueueCreateInfo{
@@ -326,11 +369,11 @@ private:
       .enabledExtensionCount = static_cast<uint32_t>(requiredDeviceExtension.size()),
       .ppEnabledExtensionNames = requiredDeviceExtension.data()
     };
-
+    
     device = vk::raii::Device(physicalDevice, deviceCreateInfo);
     renderQueue = vk::raii::Queue(device, renderQueueIdx, 0);
   }
-
+  
   void createSwapchain()
   {
     vk::SurfaceCapabilitiesKHR surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(*surface);
@@ -362,7 +405,7 @@ private:
     swapchain       = vk::raii::SwapchainKHR(device, swapchainCreateInfo);
     swapchainImages = swapchain.getImages();
   }
-
+  
   void createImageViews()
   {
     assert(swapchainImageViews.empty());
@@ -383,11 +426,11 @@ private:
       swapchainImageViews.emplace_back(device, imageViewCreateInfo);
     }
   }
-
+  
   void createGraphicsPipeline()
   {
     vk::raii::ShaderModule shaderModule = createShaderModule(readFile("shaders/shader.spv"));
-
+    
     vk::PipelineShaderStageCreateInfo vertShaderStageInfo{
       .stage = vk::ShaderStageFlagBits::eVertex,
       .module = shaderModule,
@@ -402,7 +445,14 @@ private:
     };
     vk::PipelineShaderStageCreateInfo shaderStagesInfo[] = {vertShaderStageInfo, fragShaderStageInfo};
     
-    vk::PipelineVertexInputStateCreateInfo vertexInputInfo;
+    auto bindingDescription = Vertex::getBindingDescription();
+    auto attributeDescriptions = Vertex::getAttributeDescriptions();
+    vk::PipelineVertexInputStateCreateInfo vertexInputInfo {
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &bindingDescription,
+      .vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size()),
+      .pVertexAttributeDescriptions = attributeDescriptions.data()
+    };
     vk::PipelineInputAssemblyStateCreateInfo inputAssemblyInfo {.topology = vk::PrimitiveTopology::eTriangleList};
     vk::PipelineViewportStateCreateInfo viewportStateInfo {.viewportCount = 1, .scissorCount = 1};
     
@@ -426,9 +476,9 @@ private:
     vk::PipelineColorBlendAttachmentState colorBlendAttachment {
       .blendEnable = vk::False,
       .colorWriteMask = vk::ColorComponentFlagBits::eR |
-                        vk::ColorComponentFlagBits::eG |
-                        vk::ColorComponentFlagBits::eB |
-                        vk::ColorComponentFlagBits::eA
+      vk::ColorComponentFlagBits::eG |
+      vk::ColorComponentFlagBits::eB |
+      vk::ColorComponentFlagBits::eA
     };
     vk::PipelineColorBlendStateCreateInfo colorBlendingInfo {
       .logicOpEnable = vk::False,
@@ -489,6 +539,86 @@ private:
     commandPool = vk::raii::CommandPool(device, poolInfo);
   }
   
+  std::pair<vk::raii::Buffer, vk::raii::DeviceMemory> createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
+                                                                   vk::MemoryPropertyFlags properties)
+  {
+    vk::BufferCreateInfo bufferInfo {.size = size, .usage = usage, .sharingMode = vk::SharingMode::eExclusive};
+    vk::raii::Buffer buffer = vk::raii::Buffer(device, bufferInfo);
+    vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+    vk::MemoryAllocateInfo allocInfo {
+      .allocationSize = memRequirements.size,
+      .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)
+    };
+    vk::raii::DeviceMemory bufferMemory = vk::raii::DeviceMemory(device, allocInfo);
+    buffer.bindMemory(*bufferMemory, 0); // associate buffer with device-allocated memory
+    return {std::move(buffer), std::move(bufferMemory)};
+  }
+  
+  void createVertexBuffer()
+  {
+    vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+    
+    auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc,
+                                                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+    
+    void *data = stagingBufferMemory.mapMemory(0, bufferSize);
+    memcpy(data, vertices.data(), bufferSize);
+    stagingBufferMemory.unmapMemory();
+    
+    std::tie(vertexBuffer, vertexBufferMemory) = createBuffer(bufferSize,
+                                                              vk::BufferUsageFlagBits::eTransferDst |
+                                                              vk::BufferUsageFlagBits::eVertexBuffer,
+                                                              vk::MemoryPropertyFlagBits::eDeviceLocal);
+    copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+  }
+  
+  void createIndexBuffer()
+  {
+    vk::DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+    
+    auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc,
+                                                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+    void *data = stagingBufferMemory.mapMemory(0, bufferSize);
+    memcpy(data, indices.data(), (size_t) bufferSize);
+    stagingBufferMemory.unmapMemory();
+    
+    std::tie(indexBuffer, indexBufferMemory) = createBuffer(bufferSize,
+                                                            vk::BufferUsageFlagBits::eTransferDst |
+                                                            vk::BufferUsageFlagBits::eIndexBuffer,
+                                                            vk::MemoryPropertyFlagBits::eDeviceLocal);
+    copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+  }
+  
+  void copyBuffer(vk::raii::Buffer &srcBuffer, vk::raii::Buffer &dstBuffer, vk::DeviceSize size)
+  {
+    vk::CommandBufferAllocateInfo allocInfo {
+      .commandPool = commandPool,
+      .level = vk::CommandBufferLevel::ePrimary,
+      .commandBufferCount = 1
+    };
+    vk::raii::CommandBuffer commandCopyBuffer = std::move(device.allocateCommandBuffers(allocInfo).front());
+    commandCopyBuffer.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, vk::BufferCopy(0, 0, size));
+    commandCopyBuffer.end();
+    renderQueue.submit(vk::SubmitInfo{.commandBufferCount = 1, .pCommandBuffers = &*commandCopyBuffer}, nullptr);
+    renderQueue.waitIdle();
+  }
+  
+  uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties)
+  {
+    vk::PhysicalDeviceMemoryProperties memProperties = physicalDevice.getMemoryProperties();
+    
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+      if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+        return i;
+      }
+    }
+    
+    throw std::runtime_error("failed to find suitable memory type!");
+  }
+  
   void createCommandBuffers()
   {
     vk::CommandBufferAllocateInfo allocInfo {
@@ -534,9 +664,11 @@ private:
     // rendering commands
     commandBuffer.beginRendering(renderingInfo);
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
+    commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
+    commandBuffer.bindIndexBuffer(*indexBuffer, 0, vk::IndexTypeValue<decltype(indices)::value_type>::value);
     commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height), 0.0f, 1.0f));
     commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
-    commandBuffer.draw(3, 1, 0, 0);
+    commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
     commandBuffer.endRendering();
 
     // After rendering, transition the swapchain image to vk::ImageLayout::ePresentSrcKHR
