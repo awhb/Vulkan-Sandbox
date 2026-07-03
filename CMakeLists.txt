@@ -92,7 +92,7 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src/" FILES ${SOURCES})
 
 set_target_properties (${TEMPLATE_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${TEMPLATE_DIR})
 set_target_properties (${TEMPLATE_NAME} PROPERTIES CXX_STANDARD 20)
-target_link_libraries (${TEMPLATE_NAME} Vulkan::cppm glfw)
+target_link_libraries (${TEMPLATE_NAME} Vulkan::cppm glfw tinyobjloader)
 target_include_directories (${TEMPLATE_NAME} PRIVATE ${STB_INCLUDEDIR})
 
 # Add compile definition if C++ 20 module is enabled
