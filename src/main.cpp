@@ -409,7 +409,7 @@ private:
     vk::PhysicalDeviceVulkan13Features,
     vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
     vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR> featureChain = {
-      {.features = {.samplerAnisotropy = true}},
+      {.features = {.sampleRateShading = true, .samplerAnisotropy = true}},
       {.shaderDrawParameters = true},
       {.synchronization2 = true, .dynamicRendering = true},
       {.extendedDynamicState = true},
@@ -542,7 +542,8 @@ private:
     // Multisampling combines fragments for the same pixel from multiple polygons to perform antialiasing cheaply
     vk::PipelineMultisampleStateCreateInfo multisamplingInfo {
       .rasterizationSamples = msaaSamples,
-      .sampleShadingEnable = vk::False
+      .sampleShadingEnable = vk::True,
+      .minSampleShading = 0.2f
     };
     
     vk::PipelineDepthStencilStateCreateInfo depthStencilInfo {
@@ -1474,7 +1475,8 @@ private:
                                                          vk::PhysicalDeviceVulkan13Features,
                                                          vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
                                                          vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR>();
-    bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
+    bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceFeatures2>().features.sampleRateShading &&
+                                    features.template get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
                                     features.template get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
                                     features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
                                     features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState &&
