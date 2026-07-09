@@ -29,6 +29,11 @@ import vulkan_hpp;
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
+#define VMA_IMPLEMENTATION
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include <vk_mem_alloc_raii.hpp>
+
 const uint32_t WIDTH  = 800;
 const uint32_t HEIGHT = 600;
 const std::string MODEL_PATH = "models/viking_room.obj";
@@ -118,33 +123,29 @@ private:
   vk::Extent2D swapchainExtent;
   std::vector<vk::raii::ImageView> swapchainImageViews;
   
+  vma::raii::Allocator allocator = nullptr;
+  
   vk::raii::DescriptorSetLayout descriptorSetLayout = nullptr;
   vk::raii::PipelineLayout pipelineLayout = nullptr;
   vk::raii::Pipeline graphicsPipeline = nullptr;
   
-  vk::raii::Image        colorImage       = nullptr;
-  vk::raii::DeviceMemory colorImageMemory = nullptr;
-  vk::raii::ImageView    colorImageView   = nullptr;
+  vma::raii::Image colorImage = nullptr;
+  vk::raii::ImageView colorImageView = nullptr;
   
-  vk::raii::Image depthImage = nullptr;
-  vk::raii::DeviceMemory depthImageMemory = nullptr;
+  vma::raii::Image depthImage = nullptr;
   vk::raii::ImageView depthImageView = nullptr;
   
   uint32_t mipLevels = 0; // set by texture dimensions
-  vk::raii::Image textureImage = nullptr;
-  vk::raii::DeviceMemory textureImageMemory = nullptr;
+  vma::raii::Image textureImage = nullptr;
   vk::raii::ImageView textureImageView = nullptr;
   vk::raii::Sampler textureSampler = nullptr;
   
   std::vector<Vertex> vertices;
   std::vector<uint32_t> indices;
-  vk::raii::Buffer vertexBuffer = nullptr;
-  vk::raii::DeviceMemory vertexBufferMemory = nullptr;
-  vk::raii::Buffer indexBuffer = nullptr;
-  vk::raii::DeviceMemory indexBufferMemory = nullptr;
+  vma::raii::Buffer vertexBuffer = nullptr;
+  vma::raii::Buffer indexBuffer = nullptr;
   
-  std::vector<vk::raii::Buffer> uniformBuffers;
-  std::vector<vk::raii::DeviceMemory> uniformBuffersMemory;
+  std::vector<vma::raii::Buffer> uniformBuffers;
   std::vector<void *> uniformBuffersMapped;
   
   vk::raii::DescriptorPool descriptorPool = nullptr;
@@ -193,6 +194,7 @@ private:
     createSurface();
     pickPhysicalDevice();
     createLogicalDevice();
+    createMemoryAllocator();
     createSwapchain();
     createImageViews();
     createDescriptorSetLayout();
@@ -250,6 +252,7 @@ private:
     cleanupSwapchain();
     createSwapchain();
     createImageViews();
+    createColorResources();
     createDepthResources();
   }
   
@@ -405,11 +408,13 @@ private:
     
     // query for Vulkan 1.3 features
     vk::StructureChain<vk::PhysicalDeviceFeatures2,
-    vk::PhysicalDeviceVulkan11Features,
-    vk::PhysicalDeviceVulkan13Features,
-    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
-    vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR> featureChain = {
+                       vk::PhysicalDeviceBufferDeviceAddressFeatures,
+                       vk::PhysicalDeviceVulkan11Features,
+                       vk::PhysicalDeviceVulkan13Features,
+                       vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
+                       vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR> featureChain = {
       {.features = {.sampleRateShading = true, .samplerAnisotropy = true}},
+      {.bufferDeviceAddress = true},
       {.shaderDrawParameters = true},
       {.synchronization2 = true, .dynamicRendering = true},
       {.extendedDynamicState = true},
@@ -433,6 +438,16 @@ private:
     
     device = vk::raii::Device(physicalDevice, deviceCreateInfo);
     renderQueue = vk::raii::Queue(device, renderQueueIdx, 0);
+  }
+  
+  void createMemoryAllocator()
+  {
+    vma::AllocatorCreateInfo allocatorInfo {
+      .flags = vma::AllocatorCreateFlagBits::eBufferDeviceAddress | vma::AllocatorCreateFlagBits::eExtMemoryPriority,
+      .physicalDevice = *physicalDevice,
+      .vulkanApiVersion = vk::ApiVersion14
+    };
+    allocator = vma::raii::Allocator(instance, device, allocatorInfo);
   }
   
   void createSwapchain()
@@ -629,15 +644,24 @@ private:
   void createColorResources()
   {
     vk::Format colorFormat = swapchainSurfaceFormat.format;
-
-    std::tie(colorImage, colorImageMemory) = createImage(swapchainExtent.width,
-                                                         swapchainExtent.height,
-                                                         1,
-                                                         msaaSamples,
-                                                         colorFormat,
-                                                         vk::ImageTiling::eOptimal,
-                                                         vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment,
-                                                         vk::MemoryPropertyFlagBits::eDeviceLocal);
+    
+    vk::ImageCreateInfo imageInfo {
+      .imageType = vk::ImageType::e2D,
+      .format = colorFormat,
+      .extent = {swapchainExtent.width, swapchainExtent.height, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = msaaSamples,
+      .tiling = vk::ImageTiling::eOptimal,
+      .usage = vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo allocInfo {
+      .flags = vma::AllocationCreateFlagBits::eDedicatedMemory,
+      .usage = vma::MemoryUsage::eAuto,
+      .priority = 1.0f
+    };
+    colorImage = vma::raii::Image(allocator, imageInfo, allocInfo);
     colorImageView = createImageView(colorImage, colorFormat, vk::ImageAspectFlagBits::eColor, 1);
   }
 
@@ -646,14 +670,23 @@ private:
   {
     vk::Format depthFormat = findDepthFormat();
 
-    std::tie(depthImage, depthImageMemory) = createImage(swapchainExtent.width,
-                                                         swapchainExtent.height,
-                                                         1,
-                                                         msaaSamples,
-                                                         depthFormat,
-                                                         vk::ImageTiling::eOptimal,
-                                                         vk::ImageUsageFlagBits::eDepthStencilAttachment,
-                                                         vk::MemoryPropertyFlagBits::eDeviceLocal);
+    vk::ImageCreateInfo imageInfo {
+      .imageType = vk::ImageType::e2D,
+      .format = depthFormat,
+      .extent = {swapchainExtent.width, swapchainExtent.height, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = msaaSamples,
+      .tiling = vk::ImageTiling::eOptimal,
+      .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo allocInfo {
+      .flags = vma::AllocationCreateFlagBits::eDedicatedMemory,
+      .usage = vma::MemoryUsage::eAuto,
+      .priority = 1.0f
+    };
+    depthImage = vma::raii::Image(allocator, imageInfo, allocInfo);
     depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
   }
 
@@ -682,30 +715,44 @@ private:
   {
     int texWidth, texHeight, texChannels;
     stbi_uc *pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    
     if (!pixels) {
       throw std::runtime_error("failed to load texture image!");
     }
     
+    // create staging buffer for copying pixel data to device memory
     vk::DeviceSize imageSize = texWidth * texHeight * 4;
     mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
-    auto [stagingBuffer, stagingBufferMemory] = createBuffer(imageSize, vk::BufferUsageFlagBits::eTransferSrc,
-                                                             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-    void *data = stagingBufferMemory.mapMemory(0, imageSize);
-    memcpy(data, pixels, imageSize);
-    stagingBufferMemory.unmapMemory();
-    
+    vk::BufferCreateInfo stagingBufferInfo {
+      .size = imageSize,
+      .usage = vk::BufferUsageFlagBits::eTransferSrc,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo stagingAllocInfo {
+      .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
+      .usage = vma::MemoryUsage::eAuto
+    };
+    vma::raii::Buffer stagingBuffer(allocator, stagingBufferInfo, stagingAllocInfo);
+    stagingBuffer.getAllocation().copyFromMemory(pixels, 0, imageSize);
     stbi_image_free(pixels); // clean up original pixel array now
     
-    std::tie(textureImage, textureImageMemory) = createImage(texWidth,
-                                                             texHeight,
-                                                             mipLevels,
-                                                             vk::SampleCountFlagBits::e1,
-                                                             vk::Format::eR8G8B8A8Srgb,
-                                                             vk::ImageTiling::eOptimal,
-                                                             vk::ImageUsageFlagBits::eTransferSrc |
-                                                                vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
-                                                             vk::MemoryPropertyFlagBits::eDeviceLocal);
+    // create image in device memory as copy target
+    vk::ImageCreateInfo imageInfo {
+      .imageType = vk::ImageType::e2D,
+      .format = vk::Format::eR8G8B8A8Srgb,
+      .extent = {static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight), 1},
+      .mipLevels = mipLevels,
+      .arrayLayers = 1,
+      .samples = vk::SampleCountFlagBits::e1,
+      .tiling = vk::ImageTiling::eOptimal,
+      .usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo allocInfo {
+      .usage = vma::MemoryUsage::eAutoPreferDevice
+    };
+    textureImage = vma::raii::Image(allocator, imageInfo, allocInfo);
+    
+    // copy pixel data from staging buffer to texture image and generate mipmaps
     vk::raii::CommandBuffer commandBuffer = beginSingleTimeCommands();
     transitionImageLayout(
         commandBuffer,
@@ -857,44 +904,21 @@ private:
     return vk::raii::ImageView(device, viewInfo);
   }
   
-  std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::SampleCountFlagBits numSamples, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties)
-  {
-    vk::ImageCreateInfo imageInfo {
-      .imageType = vk::ImageType::e2D,
-      .format = format,
-      .extent = {width, height, 1},
-      .mipLevels = mipLevels,
-      .arrayLayers = 1,
-      .samples = numSamples,
-      .tiling = tiling,
-      .usage = usage,
-      .sharingMode = vk::SharingMode::eExclusive
-    };
-    
-    vk::raii::Image image = vk::raii::Image(device, imageInfo);
-    vk::MemoryRequirements memRequirements = image.getMemoryRequirements();
-    vk::MemoryAllocateInfo allocInfo {
-      .allocationSize = memRequirements.size,
-      .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)
-    };
-    vk::raii::DeviceMemory imageMemory = vk::raii::DeviceMemory(device, allocInfo);
-    image.bindMemory(*imageMemory, 0);
-    return {std::move(image), std::move(imageMemory)};
-  }
-  
   void copyBufferToImage(vk::raii::CommandBuffer &commandBuffer, const vk::raii::Buffer &buffer, vk::raii::Image &image, uint32_t width, uint32_t height)
   {
-    vk::BufferImageCopy region{.bufferOffset      = 0,
-                               .bufferRowLength   = 0,
-                               .bufferImageHeight = 0,
-                               .imageSubresource  = {
-                                 .aspectMask = vk::ImageAspectFlagBits::eColor,
-                                 .mipLevel = 0,
-                                 .baseArrayLayer = 0,
-                                 .layerCount = 1
-                               },
-                               .imageOffset       = {0, 0, 0},
-                               .imageExtent       = {width, height, 1}};
+    vk::BufferImageCopy region {
+      .bufferOffset      = 0,
+      .bufferRowLength   = 0,
+      .bufferImageHeight = 0,
+      .imageSubresource  = {
+        .aspectMask = vk::ImageAspectFlagBits::eColor,
+        .mipLevel = 0,
+        .baseArrayLayer = 0,
+        .layerCount = 1
+      },
+      .imageOffset       = {0, 0, 0},
+      .imageExtent       = {width, height, 1}
+    };
     commandBuffer.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, region);
   }
   
@@ -938,37 +962,31 @@ private:
     std::cout << "Loaded model with " << vertices.size() << " unique vertices and " << indices.size() << " indices." << std::endl;
   }
   
-  std::pair<vk::raii::Buffer, vk::raii::DeviceMemory> createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
-                                                                   vk::MemoryPropertyFlags properties)
-  {
-    vk::BufferCreateInfo bufferInfo {.size = size, .usage = usage, .sharingMode = vk::SharingMode::eExclusive};
-    vk::raii::Buffer buffer = vk::raii::Buffer(device, bufferInfo);
-    vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
-    vk::MemoryAllocateInfo allocInfo {
-      .allocationSize = memRequirements.size,
-      .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)
-    };
-    vk::raii::DeviceMemory bufferMemory = vk::raii::DeviceMemory(device, allocInfo);
-    buffer.bindMemory(*bufferMemory, 0); // associate buffer with device-allocated memory
-    return {std::move(buffer), std::move(bufferMemory)};
-  }
-  
   void createVertexBuffer()
   {
     vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
     
-    auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc,
-                                                             vk::MemoryPropertyFlagBits::eHostVisible |
-                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+    vk::BufferCreateInfo stagingBufferInfo {
+      .size = bufferSize,
+      .usage = vk::BufferUsageFlagBits::eTransferSrc,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo stagingAllocInfo {
+      .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
+      .usage = vma::MemoryUsage::eAuto,
+    };
+    vma::raii::Buffer stagingBuffer(allocator, stagingBufferInfo, stagingAllocInfo);
+    stagingBuffer.getAllocation().copyFromMemory(vertices.data(), 0, bufferSize);
     
-    void *data = stagingBufferMemory.mapMemory(0, bufferSize);
-    memcpy(data, vertices.data(), bufferSize);
-    stagingBufferMemory.unmapMemory();
-    
-    std::tie(vertexBuffer, vertexBufferMemory) = createBuffer(bufferSize,
-                                                              vk::BufferUsageFlagBits::eTransferDst |
-                                                              vk::BufferUsageFlagBits::eVertexBuffer,
-                                                              vk::MemoryPropertyFlagBits::eDeviceLocal);
+    vk::BufferCreateInfo vertexBufferInfo {
+      .size = bufferSize,
+      .usage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo vertexAllocInfo {
+      .usage = vma::MemoryUsage::eAutoPreferDevice,
+    };
+    vertexBuffer = vma::raii::Buffer(allocator, vertexBufferInfo, vertexAllocInfo);
     copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
   }
   
@@ -976,17 +994,26 @@ private:
   {
     vk::DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
     
-    auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc,
-                                                             vk::MemoryPropertyFlagBits::eHostVisible |
-                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
-    void *data = stagingBufferMemory.mapMemory(0, bufferSize);
-    memcpy(data, indices.data(), (size_t) bufferSize);
-    stagingBufferMemory.unmapMemory();
-    
-    std::tie(indexBuffer, indexBufferMemory) = createBuffer(bufferSize,
-                                                            vk::BufferUsageFlagBits::eTransferDst |
-                                                            vk::BufferUsageFlagBits::eIndexBuffer,
-                                                            vk::MemoryPropertyFlagBits::eDeviceLocal);
+    vk::BufferCreateInfo stagingBufferInfo {
+      .size = bufferSize,
+      .usage = vk::BufferUsageFlagBits::eTransferSrc,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo stagingAllocInfo {
+      .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
+      .usage = vma::MemoryUsage::eAuto,
+    };
+    vma::raii::Buffer stagingBuffer(allocator, stagingBufferInfo, stagingAllocInfo);
+    stagingBuffer.getAllocation().copyFromMemory(indices.data(), 0, bufferSize);
+    vk::BufferCreateInfo indexBufferInfo {
+      .size = bufferSize,
+      .usage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer,
+      .sharingMode = vk::SharingMode::eExclusive
+    };
+    vma::AllocationCreateInfo indexAllocInfo {
+      .usage = vma::MemoryUsage::eAutoPreferDevice,
+    };
+    indexBuffer = vma::raii::Buffer(allocator, indexBufferInfo, indexAllocInfo);
     copyBuffer(stagingBuffer, indexBuffer, bufferSize);
   }
   
@@ -994,12 +1021,18 @@ private:
   {
     vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-      auto [buffer, bufferMem] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eUniformBuffer,
-                                              vk::MemoryPropertyFlagBits::eHostVisible |
-                                              vk::MemoryPropertyFlagBits::eHostCoherent);
-      uniformBuffers.emplace_back(std::move(buffer));
-      uniformBuffersMemory.emplace_back(std::move(bufferMem));
-      uniformBuffersMapped.emplace_back(uniformBuffersMemory.back().mapMemory(0, bufferSize));
+      vk::BufferCreateInfo uniformBufferInfo {
+        .size = bufferSize,
+        .usage = vk::BufferUsageFlagBits::eUniformBuffer,
+        .sharingMode = vk::SharingMode::eExclusive
+      };
+      vma::AllocationCreateInfo uniformAllocInfo {
+        .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
+        .usage = vma::MemoryUsage::eAuto
+      };
+      vma::AllocationInfo uniformMemoryInfo{};
+      uniformBuffers.emplace_back(allocator, uniformBufferInfo, uniformAllocInfo, &uniformMemoryInfo);
+      uniformBuffersMapped.emplace_back(uniformMemoryInfo.pMappedData);
     }
   }
   
@@ -1471,12 +1504,14 @@ private:
 
     // Check if the physicalDevice supports the required features
     auto features = physicalDevice.template getFeatures2<vk::PhysicalDeviceFeatures2,
+                                                         vk::PhysicalDeviceBufferDeviceAddressFeatures,
                                                          vk::PhysicalDeviceVulkan11Features,
                                                          vk::PhysicalDeviceVulkan13Features,
                                                          vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT,
                                                          vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR>();
     bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceFeatures2>().features.sampleRateShading &&
                                     features.template get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
+                                    features.template get<vk::PhysicalDeviceBufferDeviceAddressFeatures>().bufferDeviceAddress &&
                                     features.template get<vk::PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
                                     features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
                                     features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState &&
