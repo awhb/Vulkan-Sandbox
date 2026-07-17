@@ -443,7 +443,7 @@ private:
   void createMemoryAllocator()
   {
     vma::AllocatorCreateInfo allocatorInfo {
-      .flags = vma::AllocatorCreateFlagBits::eBufferDeviceAddress | vma::AllocatorCreateFlagBits::eExtMemoryPriority,
+      .flags = vma::AllocatorCreateFlagBits::eBufferDeviceAddress,
       .physicalDevice = *physicalDevice,
       .vulkanApiVersion = vk::ApiVersion14
     };
@@ -658,8 +658,7 @@ private:
     };
     vma::AllocationCreateInfo allocInfo {
       .flags = vma::AllocationCreateFlagBits::eDedicatedMemory,
-      .usage = vma::MemoryUsage::eAuto,
-      .priority = 1.0f
+      .usage = vma::MemoryUsage::eAutoPreferDevice
     };
     colorImage = vma::raii::Image(allocator, imageInfo, allocInfo);
     colorImageView = createImageView(colorImage, colorFormat, vk::ImageAspectFlagBits::eColor, 1);
@@ -683,8 +682,7 @@ private:
     };
     vma::AllocationCreateInfo allocInfo {
       .flags = vma::AllocationCreateFlagBits::eDedicatedMemory,
-      .usage = vma::MemoryUsage::eAuto,
-      .priority = 1.0f
+      .usage = vma::MemoryUsage::eAutoPreferDevice
     };
     depthImage = vma::raii::Image(allocator, imageInfo, allocInfo);
     depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
