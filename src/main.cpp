@@ -289,7 +289,7 @@ private:
     }
     
     // Get required extensions
-    auto extensions = getRequiredExtensions();
+    auto extensions = getRequiredInstanceExtensions();
     
     // Check if required extensions are supported by Vulkan implementation
     auto extensionProperties = context.enumerateInstanceExtensionProperties();
@@ -1519,7 +1519,7 @@ private:
     return supportsVulkan1_3 && supportsGraphicsAndPresent && supportsAllRequiredExtensions && supportsRequiredFeatures;
   }
 
-  std::vector<const char*> getRequiredExtensions()
+  std::vector<const char*> getRequiredInstanceExtensions()
   {
     uint32_t glfwExtensionCount = 0;
     const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
