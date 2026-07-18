@@ -164,7 +164,6 @@ private:
   
   bool framebufferResized = false;
   
-  // TODO: CLEAR WHICH?
   std::vector<const char *> requiredDeviceExtension = {
     vk::KHRSwapchainExtensionName,
     vk::KHRBufferDeviceAddressExtensionName,
