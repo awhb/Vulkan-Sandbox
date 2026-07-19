@@ -21,13 +21,15 @@ import vulkan_hpp;
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/hash.hpp>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
+// TINYGLTF_IMPLEMENTATION is already defined in the command line
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <tiny_gltf.h>
 
-#define TINYOBJLOADER_IMPLEMENTATION
-#include <tiny_obj_loader.h>
+// Include KTX library for texture loading
+#include <ktx.h>
 
 #define VMA_IMPLEMENTATION
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
@@ -36,8 +38,8 @@ import vulkan_hpp;
 
 const uint32_t WIDTH  = 800;
 const uint32_t HEIGHT = 600;
-const std::string MODEL_PATH = "models/viking_room.obj";
-const std::string TEXTURE_PATH = "textures/viking_room.png";
+const std::string MODEL_PATH = "models/viking_room.glb";
+const std::string TEXTURE_PATH = "textures/viking_room.ktx2";
 constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
 struct DeviceCapabilities
@@ -139,6 +141,7 @@ private:
   vma::raii::Image textureImage = nullptr;
   vk::raii::ImageView textureImageView = nullptr;
   vk::raii::Sampler textureSampler = nullptr;
+  vk::Format textureImageFormat = vk::Format::eUndefined;
   
   std::vector<Vertex> vertices;
   std::vector<uint32_t> indices;
@@ -212,9 +215,9 @@ private:
     createGraphicsPipeline();
     createCommandPool();
     createTextureImage();
+    createTextureImageView();
     createTextureSampler();
     loadModel();
-    createTextureImageView();
     createVertexBuffer();
     createIndexBuffer();
     createUniformBuffers();
@@ -922,14 +925,19 @@ private:
   
   void createTextureImage()
   {
-    int texWidth, texHeight, texChannels;
-    stbi_uc *pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    if (!pixels) {
-      throw std::runtime_error("failed to load texture image!");
+    // Load KTX2 texture
+    ktxTexture *kTexture;
+    KTX_error_code result = ktxTexture_CreateFromNamedFile(TEXTURE_PATH.c_str(), KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &kTexture);
+    if (result != KTX_SUCCESS) {
+      throw std::runtime_error("Failed to load KTX texture image!");
     }
     
-    // create staging buffer for copying pixel data to device memory
-    vk::DeviceSize imageSize = texWidth * texHeight * 4;
+    // Get texture dimensions and data
+    uint32_t texWidth = kTexture->baseWidth;
+    uint32_t texHeight = kTexture->baseHeight;
+    ktx_size_t imageSize = ktxTexture_GetImageSize(kTexture, 0);
+    ktx_uint8_t *ktxTextureData = ktxTexture_GetData(kTexture);
+    
     mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
     vk::BufferCreateInfo stagingBufferInfo {
       .size = imageSize,
@@ -941,13 +949,30 @@ private:
       .usage = vma::MemoryUsage::eAuto
     };
     vma::raii::Buffer stagingBuffer(allocator, stagingBufferInfo, stagingAllocInfo);
-    stagingBuffer.getAllocation().copyFromMemory(pixels, 0, imageSize);
-    stbi_image_free(pixels); // clean up original pixel array now
+    stagingBuffer.getAllocation().copyFromMemory(ktxTextureData, 0, imageSize);
+    
+    vk::Format textureFormat;
+    
+    // Check if KTX texture has a format
+    if (kTexture->classId == ktxTexture2_c) {
+      // For KTX2 files, we can get the format directly
+      auto *ktx2 = reinterpret_cast<ktxTexture2 *>(kTexture);
+      textureFormat = static_cast<vk::Format>(ktx2->vkFormat);
+      if (textureFormat == vk::Format::eUndefined) {
+        // If the format is undefined, fall back to a reasonable default
+        textureFormat = vk::Format::eR8G8B8A8Unorm;
+      }
+    } else {
+      // For KTX1 files or if we can't determine the format, use a reasonable default
+      textureFormat = vk::Format::eR8G8B8A8Unorm;
+    }
+    
+    textureImageFormat = textureFormat;
     
     // create image in device memory as copy target
     vk::ImageCreateInfo imageInfo {
       .imageType = vk::ImageType::e2D,
-      .format = vk::Format::eR8G8B8A8Srgb,
+      .format = textureImageFormat,
       .extent = {static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight), 1},
       .mipLevels = mipLevels,
       .arrayLayers = 1,
@@ -979,6 +1004,8 @@ private:
     copyBufferToImage(commandBuffer, stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
     generateMipmaps(commandBuffer, textureImage, vk::Format::eR8G8B8A8Srgb, texWidth, texHeight, mipLevels);
     endSingleTimeCommands(std::move(commandBuffer));
+    
+    ktxTexture_Destroy(kTexture);
   }
   
   void generateMipmaps(vk::raii::CommandBuffer &commandBuffer, vk::raii::Image &image, vk::Format imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels)
@@ -1072,7 +1099,7 @@ private:
   
   void createTextureImageView()
   {
-    textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, mipLevels);
+    textureImageView = createImageView(*textureImage, textureImageFormat, vk::ImageAspectFlagBits::eColor, mipLevels);
   }
   
   void createTextureSampler()
@@ -1133,42 +1160,180 @@ private:
   
   void loadModel()
   {
-    tinyobj::attrib_t attrib;
-    std::vector<tinyobj::shape_t> shapes;
-    std::vector<tinyobj::material_t> materials;
-    std::string warn, err;
-    
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str())) {
-      throw std::runtime_error(warn + err);
+    // Use tinygltf to load the model
+    tinygltf::Model model;
+    tinygltf::TinyGLTF loader;
+    std::string err;
+    std::string warn;
+    bool ret = loader.LoadBinaryFromFile(&model, &err, &warn, MODEL_PATH);
+    if (!warn.empty()) {
+      std::cout << "glTF warning: " << warn << std::endl;
+    }
+    if (!err.empty()) {
+        std::cout << "glTF error: " << err << std::endl;
+    }
+    if (!ret) {
+        throw std::runtime_error("Failed to load glTF model");
     }
     
-    std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+    const int sceneIndex = model.defaultScene >= 0 ? model.defaultScene : 0;
+    if (sceneIndex >= static_cast<int>(model.scenes.size())) {
+      throw std::runtime_error("glTF model has no valid scene");
+    }
     
-    for (const auto& shape : shapes) {
-      for (const auto& index : shape.mesh.indices) {
-        Vertex vertex{};
-        vertex.pos = {
-          attrib.vertices[3 * index.vertex_index + 0],
-          attrib.vertices[3 * index.vertex_index + 1],
-          attrib.vertices[3 * index.vertex_index + 2]
-        };
-        vertex.texCoord = {
-          attrib.texcoords[2 * index.texcoord_index + 0],
-          1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
-        };
-        vertex.color = {1.0f, 1.0f, 1.0f};
-        
-        auto [it, inserted] = uniqueVertices.insert({vertex, static_cast<uint32_t>(vertices.size())});
-        if (inserted)
-        {
-          vertices.push_back(vertex);
-        }
-
-        indices.push_back(it->second);
-      }
+    vertices.clear();
+    indices.clear();
+    
+    for (int rootNodeIndex : model.scenes[sceneIndex].nodes) {
+      loadNode(model, rootNodeIndex, glm::mat4{1.0f});
     }
     
     std::cout << "Loaded model with " << vertices.size() << " unique vertices and " << indices.size() << " indices." << std::endl;
+  }
+  
+  void loadNode(tinygltf::Model const &model, int nodeIndex, glm::mat4 const &parentTransform)
+  {
+    auto const &node = model.nodes[nodeIndex];
+    glm::mat4 const worldTransform =
+      parentTransform * getNodeLocalTransform(node);
+
+    if (node.mesh >= 0) {
+      auto const &mesh = model.meshes[node.mesh];
+
+      for (auto const &primitive : mesh.primitives) {
+        loadPrimitive(model, primitive, worldTransform);
+      }
+    }
+
+    for (int childIndex : node.children) {
+      loadNode(model, childIndex, worldTransform);
+    }
+  }
+  
+  void loadPrimitive(tinygltf::Model const &model, tinygltf::Primitive const &primitive, glm::mat4 const &worldTransform)
+  {
+    if (primitive.mode != TINYGLTF_MODE_TRIANGLES) {
+      return;
+    }
+    
+    // Get indices
+    const tinygltf::Accessor &indexAccessor = model.accessors[primitive.indices];
+    const tinygltf::BufferView &indexBufferView = model.bufferViews[indexAccessor.bufferView];
+    const tinygltf::Buffer &indexBuffer = model.buffers[indexBufferView.buffer];
+    
+    // Get vertex positions
+    const tinygltf::Accessor &posAccessor = model.accessors[primitive.attributes.at("POSITION")];
+    const tinygltf::BufferView &posBufferView = model.bufferViews[posAccessor.bufferView];
+    const tinygltf::Buffer &posBuffer = model.buffers[posBufferView.buffer];
+    
+    
+    // Get texture coordinates if available
+    const bool hasTexCoords = primitive.attributes.contains("TEXCOORD_0");
+    const tinygltf::Accessor *texCoordAccessor = nullptr;
+    const tinygltf::BufferView *texCoordBufferView = nullptr;
+    const tinygltf::Buffer *texCoordBuffer = nullptr;
+
+    if (hasTexCoords) {
+      texCoordAccessor = &model.accessors[primitive.attributes.at("TEXCOORD_0")];
+      texCoordBufferView = &model.bufferViews[texCoordAccessor->bufferView];
+      texCoordBuffer = &model.buffers[texCoordBufferView->buffer];
+    }
+    
+    uint32_t const baseVertex = static_cast<uint32_t>(vertices.size());
+
+    for (size_t i = 0; i < posAccessor.count; ++i) {
+      const float *pos = reinterpret_cast<const float *>(&posBuffer.data[posBufferView.byteOffset + posAccessor.byteOffset + i * posAccessor.ByteStride(posBufferView)]);
+      
+      Vertex vertex{};
+      // Vulkan's Y-axis correction already handled in UBO projection matrix inversion
+      vertex.pos = glm::vec3(worldTransform * glm::vec4(pos[0], pos[1], pos[2], 1.0f));
+      vertex.color = {1.0f, 1.0f, 1.0f};
+
+      if (hasTexCoords) {
+        const float *texCoord = reinterpret_cast<const float *>(&texCoordBuffer->data[texCoordBufferView->byteOffset + texCoordAccessor->byteOffset + i * texCoordAccessor->ByteStride(*texCoordBufferView)]);
+        vertex.texCoord = {texCoord[0], texCoord[1]};
+      } else {
+        vertex.texCoord = {0.0f, 0.0f};
+      }
+
+      vertices.push_back(vertex);
+    }
+    
+    const unsigned char *indexData = &indexBuffer.data[indexBufferView.byteOffset + indexAccessor.byteOffset];
+    size_t indexCount = indexAccessor.count;
+    size_t indexStride = 0;
+    
+    // Determine index stride based on component type
+    if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+      indexStride = sizeof(uint16_t);
+    } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+      indexStride = sizeof(uint32_t);
+    } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+      indexStride = sizeof(uint8_t);
+    } else {
+      throw std::runtime_error("Unsupported index component type");
+    }
+    
+    indices.reserve(indices.size() + indexCount);
+    
+    for (size_t i = 0; i < indexCount; i++) {
+      uint32_t index = 0;
+      
+      if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+        index = *reinterpret_cast<const uint16_t *>(indexData + i * indexStride);
+      } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+        index = *reinterpret_cast<const uint32_t *>(indexData + i * indexStride);
+      } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+        index = *reinterpret_cast<const uint8_t *>(indexData + i * indexStride);
+      }
+      
+      indices.push_back(baseVertex + index);
+    }
+  }
+  
+  glm::mat4 getNodeLocalTransform(tinygltf::Node const &node) const
+  {
+    if (node.matrix.size() == 16) {
+      glm::mat4 matrix{1.0f};
+
+      // glTF matrices are stored column-major, as GLM expects.
+      for (uint32_t column = 0; column < 4; ++column) {
+        for (uint32_t row = 0; row < 4; ++row) {
+          matrix[column][row] = static_cast<float>(node.matrix[column * 4 + row]);
+        }
+      }
+
+      return matrix;
+    }
+
+    glm::mat4 transform{1.0f};
+
+    if (node.translation.size() == 3) {
+      transform = glm::translate(transform, glm::vec3(
+        node.translation[0],
+        node.translation[1],
+        node.translation[2]));
+    }
+
+    if (node.rotation.size() == 4) {
+      // glTF: x, y, z, w. GLM constructor: w, x, y, z.
+      glm::quat rotation(
+        node.rotation[3],
+        node.rotation[0],
+        node.rotation[1],
+        node.rotation[2]);
+
+      transform *= glm::mat4_cast(rotation);
+    }
+
+    if (node.scale.size() == 3) {
+      transform = glm::scale(transform, glm::vec3(
+        node.scale[0],
+        node.scale[1],
+        node.scale[2]));
+    }
+
+    return transform;
   }
   
   void createVertexBuffer()
