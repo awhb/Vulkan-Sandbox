@@ -41,6 +41,7 @@ const uint32_t HEIGHT = 600;
 const std::string MODEL_PATH = "models/viking_room.glb";
 const std::string TEXTURE_PATH = "textures/viking_room.ktx2";
 constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+constexpr int MAX_OBJECTS = 3;
 
 struct DeviceCapabilities
 {
@@ -83,6 +84,31 @@ template<> struct std::hash<Vertex>
   size_t operator() (Vertex const &vertex) const
   {
     return ((hash<glm::vec3>()(vertex.pos) ^ (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^ (hash<glm::vec2>()(vertex.texCoord) << 1);
+  }
+};
+
+struct GameObject {
+  // Transform properties
+  glm::vec3 position = {0.0f, 0.0f, 0.0f};
+  glm::vec3 rotation = {0.0f, 0.0f, 0.0f};
+  glm::vec3 scale = {1.0f, 1.0f, 1.0f};
+  
+  // Uniform buffer for this object (one per frame in flight)
+  std::vector<vma::raii::Buffer> uniformBuffers;
+  std::vector<void *> uniformBuffersMapped;
+  
+  // Descriptor sets for this object (one per frame in flight)
+  std::vector<vk::raii::DescriptorSet> descriptorSets;
+  
+  glm::mat4 getModelMatrix() const
+  {
+    glm::mat4 model = glm::mat4(1.0f);
+    model = glm::translate(model, position);
+    model           = glm::rotate(model, rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
+    model           = glm::rotate(model, rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
+    model           = glm::rotate(model, rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
+    model           = glm::scale(model, scale);
+    return model;
   }
 };
 
@@ -148,11 +174,10 @@ private:
   vma::raii::Buffer vertexBuffer = nullptr;
   vma::raii::Buffer indexBuffer = nullptr;
   
-  std::vector<vma::raii::Buffer> uniformBuffers;
-  std::vector<void *> uniformBuffersMapped;
+  // Array of game objects to render
+  std::array<GameObject, MAX_OBJECTS> gameObjects;
   
   vk::raii::DescriptorPool descriptorPool = nullptr;
-  std::vector<vk::raii::DescriptorSet> descriptorSets;
   
   vk::raii::CommandPool commandPool = nullptr;
   std::vector<vk::raii::CommandBuffer> commandBuffers;
@@ -220,6 +245,7 @@ private:
     loadModel();
     createVertexBuffer();
     createIndexBuffer();
+    setupGameObjects();
     createUniformBuffers();
     createDescriptorPool();
     createDescriptorSets();
@@ -255,6 +281,14 @@ private:
   
   void cleanup()
   {
+    // Clean up resources for each GameObject
+    for (auto& gameObject : gameObjects) {
+      gameObject.descriptorSets.clear();
+      gameObject.uniformBuffersMapped.clear();
+      gameObject.uniformBuffers.clear();
+    }
+    
+    // Clean up GLFW resources
     glfwDestroyWindow(window);
     glfwTerminate();
   }
@@ -1184,156 +1218,84 @@ private:
     vertices.clear();
     indices.clear();
     
-    for (int rootNodeIndex : model.scenes[sceneIndex].nodes) {
-      loadNode(model, rootNodeIndex, glm::mat4{1.0f});
-    }
-    
-    std::cout << "Loaded model with " << vertices.size() << " unique vertices and " << indices.size() << " indices." << std::endl;
-  }
-  
-  void loadNode(tinygltf::Model const &model, int nodeIndex, glm::mat4 const &parentTransform)
-  {
-    auto const &node = model.nodes[nodeIndex];
-    glm::mat4 const worldTransform =
-      parentTransform * getNodeLocalTransform(node);
-
-    if (node.mesh >= 0) {
-      auto const &mesh = model.meshes[node.mesh];
-
-      for (auto const &primitive : mesh.primitives) {
-        loadPrimitive(model, primitive, worldTransform);
-      }
-    }
-
-    for (int childIndex : node.children) {
-      loadNode(model, childIndex, worldTransform);
-    }
-  }
-  
-  void loadPrimitive(tinygltf::Model const &model, tinygltf::Primitive const &primitive, glm::mat4 const &worldTransform)
-  {
-    if (primitive.mode != TINYGLTF_MODE_TRIANGLES) {
-      return;
-    }
-    
-    // Get indices
-    const tinygltf::Accessor &indexAccessor = model.accessors[primitive.indices];
-    const tinygltf::BufferView &indexBufferView = model.bufferViews[indexAccessor.bufferView];
-    const tinygltf::Buffer &indexBuffer = model.buffers[indexBufferView.buffer];
-    
-    // Get vertex positions
-    const tinygltf::Accessor &posAccessor = model.accessors[primitive.attributes.at("POSITION")];
-    const tinygltf::BufferView &posBufferView = model.bufferViews[posAccessor.bufferView];
-    const tinygltf::Buffer &posBuffer = model.buffers[posBufferView.buffer];
-    
-    
-    // Get texture coordinates if available
-    const bool hasTexCoords = primitive.attributes.contains("TEXCOORD_0");
-    const tinygltf::Accessor *texCoordAccessor = nullptr;
-    const tinygltf::BufferView *texCoordBufferView = nullptr;
-    const tinygltf::Buffer *texCoordBuffer = nullptr;
-
-    if (hasTexCoords) {
-      texCoordAccessor = &model.accessors[primitive.attributes.at("TEXCOORD_0")];
-      texCoordBufferView = &model.bufferViews[texCoordAccessor->bufferView];
-      texCoordBuffer = &model.buffers[texCoordBufferView->buffer];
-    }
-    
-    uint32_t const baseVertex = static_cast<uint32_t>(vertices.size());
-
-    for (size_t i = 0; i < posAccessor.count; ++i) {
-      const float *pos = reinterpret_cast<const float *>(&posBuffer.data[posBufferView.byteOffset + posAccessor.byteOffset + i * posAccessor.ByteStride(posBufferView)]);
-      
-      Vertex vertex{};
-      // Vulkan's Y-axis correction already handled in UBO projection matrix inversion
-      vertex.pos = glm::vec3(worldTransform * glm::vec4(pos[0], pos[1], pos[2], 1.0f));
-      vertex.color = {1.0f, 1.0f, 1.0f};
-
-      if (hasTexCoords) {
-        const float *texCoord = reinterpret_cast<const float *>(&texCoordBuffer->data[texCoordBufferView->byteOffset + texCoordAccessor->byteOffset + i * texCoordAccessor->ByteStride(*texCoordBufferView)]);
-        vertex.texCoord = {texCoord[0], texCoord[1]};
-      } else {
-        vertex.texCoord = {0.0f, 0.0f};
-      }
-
-      vertices.push_back(vertex);
-    }
-    
-    const unsigned char *indexData = &indexBuffer.data[indexBufferView.byteOffset + indexAccessor.byteOffset];
-    size_t indexCount = indexAccessor.count;
-    size_t indexStride = 0;
-    
-    // Determine index stride based on component type
-    if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
-      indexStride = sizeof(uint16_t);
-    } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-      indexStride = sizeof(uint32_t);
-    } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
-      indexStride = sizeof(uint8_t);
-    } else {
-      throw std::runtime_error("Unsupported index component type");
-    }
-    
-    indices.reserve(indices.size() + indexCount);
-    
-    for (size_t i = 0; i < indexCount; i++) {
-      uint32_t index = 0;
-      
-      if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
-        index = *reinterpret_cast<const uint16_t *>(indexData + i * indexStride);
-      } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-        index = *reinterpret_cast<const uint32_t *>(indexData + i * indexStride);
-      } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
-        index = *reinterpret_cast<const uint8_t *>(indexData + i * indexStride);
-      }
-      
-      indices.push_back(baseVertex + index);
-    }
-  }
-  
-  glm::mat4 getNodeLocalTransform(tinygltf::Node const &node) const
-  {
-    if (node.matrix.size() == 16) {
-      glm::mat4 matrix{1.0f};
-
-      // glTF matrices are stored column-major, as GLM expects.
-      for (uint32_t column = 0; column < 4; ++column) {
-        for (uint32_t row = 0; row < 4; ++row) {
-          matrix[column][row] = static_cast<float>(node.matrix[column * 4 + row]);
+    // Process all meshes in the model
+    for (const auto &mesh : model.meshes) {
+      for (const auto &primitive : mesh.primitives) {
+        // Get indices
+        const tinygltf::Accessor &indexAccessor = model.accessors[primitive.indices];
+        const tinygltf::BufferView &indexBufferView = model.bufferViews[indexAccessor.bufferView];
+        const tinygltf::Buffer &indexBuffer = model.buffers[indexBufferView.buffer];
+        
+        // Get vertex positions
+        const tinygltf::Accessor &posAccessor = model.accessors[primitive.attributes.at("POSITION")];
+        const tinygltf::BufferView &posBufferView = model.bufferViews[posAccessor.bufferView];
+        const tinygltf::Buffer &posBuffer = model.buffers[posBufferView.buffer];
+        
+        // Get texture coordinates if available
+        const bool hasTexCoords = primitive.attributes.contains("TEXCOORD_0");
+        const tinygltf::Accessor *texCoordAccessor = nullptr;
+        const tinygltf::BufferView *texCoordBufferView = nullptr;
+        const tinygltf::Buffer *texCoordBuffer = nullptr;
+        
+        if (hasTexCoords) {
+          texCoordAccessor = &model.accessors[primitive.attributes.at("TEXCOORD_0")];
+          texCoordBufferView = &model.bufferViews[texCoordAccessor->bufferView];
+          texCoordBuffer = &model.buffers[texCoordBufferView->buffer];
+        }
+        
+        uint32_t const baseVertex = static_cast<uint32_t>(vertices.size());
+        
+        for (size_t i = 0; i < posAccessor.count; ++i) {
+          const float *pos = reinterpret_cast<const float *>(&posBuffer.data[posBufferView.byteOffset + posAccessor.byteOffset + i * posAccessor.ByteStride(posBufferView)]);
+          
+          Vertex vertex{};
+          // Vulkan's Y-axis correction already handled in UBO projection matrix inversion
+          vertex.pos       = {pos[0], pos[1], pos[2]};
+          vertex.color = {1.0f, 1.0f, 1.0f};
+          
+          if (hasTexCoords) {
+            const float *texCoord = reinterpret_cast<const float *>(&texCoordBuffer->data[texCoordBufferView->byteOffset + texCoordAccessor->byteOffset + i * texCoordAccessor->ByteStride(*texCoordBufferView)]);
+            vertex.texCoord = {texCoord[0], texCoord[1]};
+          } else {
+            vertex.texCoord = {0.0f, 0.0f};
+          }
+          
+          vertices.push_back(vertex);
+        }
+        
+        const unsigned char *indexData = &indexBuffer.data[indexBufferView.byteOffset + indexAccessor.byteOffset];
+        size_t indexCount = indexAccessor.count;
+        size_t indexStride = 0;
+        
+        // Determine index stride based on component type
+        if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+          indexStride = sizeof(uint16_t);
+        } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+          indexStride = sizeof(uint32_t);
+        } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+          indexStride = sizeof(uint8_t);
+        } else {
+          throw std::runtime_error("Unsupported index component type");
+        }
+        
+        indices.reserve(indices.size() + indexCount);
+        
+        for (size_t i = 0; i < indexCount; i++) {
+          uint32_t index = 0;
+          
+          if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+            index = *reinterpret_cast<const uint16_t *>(indexData + i * indexStride);
+          } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+            index = *reinterpret_cast<const uint32_t *>(indexData + i * indexStride);
+          } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+            index = *reinterpret_cast<const uint8_t *>(indexData + i * indexStride);
+          }
+          
+          indices.push_back(baseVertex + index);
         }
       }
-
-      return matrix;
     }
-
-    glm::mat4 transform{1.0f};
-
-    if (node.translation.size() == 3) {
-      transform = glm::translate(transform, glm::vec3(
-        node.translation[0],
-        node.translation[1],
-        node.translation[2]));
-    }
-
-    if (node.rotation.size() == 4) {
-      // glTF: x, y, z, w. GLM constructor: w, x, y, z.
-      glm::quat rotation(
-        node.rotation[3],
-        node.rotation[0],
-        node.rotation[1],
-        node.rotation[2]);
-
-      transform *= glm::mat4_cast(rotation);
-    }
-
-    if (node.scale.size() == 3) {
-      transform = glm::scale(transform, glm::vec3(
-        node.scale[0],
-        node.scale[1],
-        node.scale[2]));
-    }
-
-    return transform;
+    std::cout << "Loaded model with " << vertices.size() << " unique vertices and " << indices.size() << " indices." << std::endl;
   }
   
   void createVertexBuffer()
@@ -1391,22 +1353,46 @@ private:
     copyBuffer(stagingBuffer, indexBuffer, bufferSize);
   }
   
+  void setupGameObjects()
+  {
+    // Object 1 - Center
+    gameObjects[0].position = {0.0f, 0.0f, 0.0f};
+    gameObjects[0].rotation = {0.0f, glm::radians(-90.0f), 0.0f};
+    gameObjects[0].scale    = {1.0f, 1.0f, 1.0f};
+
+    // Object 2 - Left
+    gameObjects[1].position = {-2.0f, 0.0f, -1.0f};
+    gameObjects[1].rotation = {0.0f, glm::radians(-45.0f), 0.0f};
+    gameObjects[1].scale    = {0.75f, 0.75f, 0.75f};
+
+    // Object 3 - Right
+    gameObjects[2].position = {2.0f, 0.0f, -1.0f};
+    gameObjects[2].rotation = {0.0f, glm::radians(45.0f), 0.0f};
+    gameObjects[2].scale    = {0.75f, 0.75f, 0.75f};
+  }
+  
   void createUniformBuffers()
   {
-    vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-      vk::BufferCreateInfo uniformBufferInfo {
-        .size = bufferSize,
-        .usage = vk::BufferUsageFlagBits::eUniformBuffer,
-        .sharingMode = vk::SharingMode::eExclusive
-      };
-      vma::AllocationCreateInfo uniformAllocInfo {
-        .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
-        .usage = vma::MemoryUsage::eAuto
-      };
-      vma::AllocationInfo uniformMemoryInfo{};
-      uniformBuffers.emplace_back(allocator, uniformBufferInfo, uniformAllocInfo, &uniformMemoryInfo);
-      uniformBuffersMapped.emplace_back(uniformMemoryInfo.pMappedData);
+    // For each game object
+    for (auto &gameObject : gameObjects) {
+      gameObject.uniformBuffersMapped.clear();
+      gameObject.uniformBuffers.clear();
+      
+      // Create uniform buffers for each frame in flight
+      for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        vk::BufferCreateInfo uniformBufferInfo {
+          .size = sizeof(UniformBufferObject),
+          .usage = vk::BufferUsageFlagBits::eUniformBuffer,
+          .sharingMode = vk::SharingMode::eExclusive
+        };
+        vma::AllocationCreateInfo uniformAllocInfo {
+          .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
+          .usage = vma::MemoryUsage::eAuto
+        };
+        vma::AllocationInfo uniformMemoryInfo{};
+        gameObject.uniformBuffers.emplace_back(allocator, uniformBufferInfo, uniformAllocInfo, &uniformMemoryInfo);
+        gameObject.uniformBuffersMapped.emplace_back(uniformMemoryInfo.pMappedData);
+      }
     }
   }
   
@@ -1415,16 +1401,16 @@ private:
     std::array<vk::DescriptorPoolSize, 2> poolSize {{
       {
         .type = vk::DescriptorType::eUniformBuffer,
-        .descriptorCount = MAX_FRAMES_IN_FLIGHT
+        .descriptorCount = MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT
       },
       {
         .type = vk::DescriptorType::eCombinedImageSampler,
-        .descriptorCount = MAX_FRAMES_IN_FLIGHT
+        .descriptorCount = MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT
       }
     }};
     vk::DescriptorPoolCreateInfo poolInfo {
       .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
-      .maxSets = MAX_FRAMES_IN_FLIGHT,
+      .maxSets = MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT,
       .poolSizeCount = static_cast<uint32_t>(poolSize.size()),
       .pPoolSizes = poolSize.data()
     };
@@ -1433,47 +1419,54 @@ private:
   
   void createDescriptorSets()
   {
-    std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *descriptorSetLayout);
-    vk::DescriptorSetAllocateInfo allocInfo {
-      .descriptorPool = descriptorPool,
-      .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
-      .pSetLayouts = layouts.data()
-    };
-    
-    descriptorSets.clear();
-    descriptorSets = device.allocateDescriptorSets(allocInfo);
-
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-      vk::DescriptorBufferInfo bufferInfo {
-        .buffer = uniformBuffers[i],
-        .offset = 0,
-        .range = sizeof(UniformBufferObject)
+    // For each game object
+    for (auto &gameObject : gameObjects) {
+      // Create descriptor sets for each frame in flight
+      std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *descriptorSetLayout);
+      vk::DescriptorSetAllocateInfo allocInfo {
+        .descriptorPool = descriptorPool,
+        .descriptorSetCount = static_cast<uint32_t>(layouts.size()),
+        .pSetLayouts = layouts.data()
       };
-      vk::DescriptorImageInfo imageInfo {
-        .sampler = textureSampler,
-        .imageView = textureImageView,
-        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal
-      };
-      std::array<vk::WriteDescriptorSet, 2> descriptorWrites {{
-        {
-          .dstSet = descriptorSets[i],
-          .dstBinding = 0,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType = vk::DescriptorType::eUniformBuffer,
-          .pBufferInfo = &bufferInfo
-        },
-        {
-          .dstSet = descriptorSets[i],
-          .dstBinding = 1,
-          .dstArrayElement = 0,
-          .descriptorCount = 1,
-          .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-          .pImageInfo = &imageInfo
-        }
-      }};
-      device.updateDescriptorSets(descriptorWrites, {});
+      
+      gameObject.descriptorSets.clear();
+      gameObject.descriptorSets = device.allocateDescriptorSets(allocInfo);
+      
+      for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        vk::DescriptorBufferInfo bufferInfo {
+          .buffer = *gameObject.uniformBuffers[i],
+          .offset = 0,
+          .range = sizeof(UniformBufferObject)
+        };
+        vk::DescriptorImageInfo imageInfo {
+          .sampler = textureSampler,
+          .imageView = textureImageView,
+          .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal
+        };
+        std::array<vk::WriteDescriptorSet, 2> descriptorWrites {{
+          {
+            .dstSet = *gameObject.descriptorSets[i],
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eUniformBuffer,
+            .pBufferInfo = &bufferInfo
+          },
+          {
+            .dstSet = *gameObject.descriptorSets[i],
+            .dstBinding = 1,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .pImageInfo = &imageInfo
+          }
+        }};
+        device.updateDescriptorSets(descriptorWrites, {});
+      }
     }
+    
+    
+
   }
   
   vk::raii::CommandBuffer beginSingleTimeCommands()
@@ -1619,12 +1612,21 @@ private:
     }
 
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
-    commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
-    commandBuffer.bindIndexBuffer(*indexBuffer, 0, vk::IndexTypeValue<decltype(indices)::value_type>::value);
     commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height), 0.0f, 1.0f));
     commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchainExtent));
-    commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, *descriptorSets[frameResourceIndex], nullptr);
-    commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+    
+    // Bind vertex and index buffers (shared by all objects)
+    commandBuffer.bindVertexBuffers(0, *vertexBuffer, {0});
+    commandBuffer.bindIndexBuffer(*indexBuffer, 0, vk::IndexTypeValue<decltype(indices)::value_type>::value);
+    
+    // Draw each object with its own descriptor set
+    for (const auto &gameObject : gameObjects) {
+      // Bind the descriptor set for this object
+      commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, *gameObject.descriptorSets[frameResourceIndex], nullptr);
+      
+      // Draw object
+      commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+    }
 
     if (deviceCapabilities.dynamicRenderingSupported) {
       commandBuffer.endRendering();
@@ -1792,21 +1794,38 @@ private:
     }
   }
   
-  void updateUniformBuffer(uint32_t currentImage)
+  void updateUniformBuffers()
   {
     static auto startTime = std::chrono::high_resolution_clock::now();
+    static auto lastFrameTime = startTime;
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    float time = std::chrono::duration<float>(currentTime - startTime).count();
+    float deltaTime = std::chrono::duration<float>(currentTime - lastFrameTime).count();
+    lastFrameTime = currentTime;
 
-    auto  currentTime = std::chrono::high_resolution_clock::now();
-    float time        = std::chrono::duration<float>(currentTime - startTime).count();
+    // Camera and projection matrices (shared by all objects)
+    glm::mat4 view = glm::lookAt(glm::vec3(2.0f, 2.0f, 6.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f),
+                                      static_cast<float>(swapchainExtent.width) / static_cast<float>(swapchainExtent.height),
+                                      0.1f, 20.0f);
+    proj[1][1] *= -1;
 
-    UniformBufferObject ubo{};
-    ubo.model = rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-    ubo.view = lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-    ubo.proj = glm::perspective(glm::radians(45.0f),
-                                static_cast<float>(swapchainExtent.width) / static_cast<float>(swapchainExtent.height), 0.1f, 10.0f);
-    ubo.proj[1][1] *= -1;
-
-    memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+    // Update uniform buffers for each object
+    for (auto &gameObject : gameObjects)
+    {
+      // Apply continuous rotation to the object based on frame time
+      const float rotationSpeed = 0.5f;                          // Rotation speed in radians per second
+      gameObject.rotation.y += rotationSpeed * deltaTime;        // Slow rotation around Y axis scaled by frame time
+      
+      // Get the model matrix for this object
+      glm::mat4 model = gameObject.getModelMatrix();
+      
+      // Create and update the UBO
+      UniformBufferObject ubo{.model = model, .view = view, .proj = proj};
+      
+      // Copy the UBO data to the mapped memory
+      memcpy(gameObject.uniformBuffersMapped[frameResourceIndex], &ubo, sizeof(ubo));
+    }
   }
   
   void drawFrame()
@@ -1842,7 +1861,8 @@ private:
       throw std::runtime_error("failed to acquire swap chain image!");
     }
     
-    updateUniformBuffer(frameResourceIndex);
+    // Update uniform buffers for all objects at current frame resource index
+    updateUniformBuffers();
     
     commandBuffers[frameResourceIndex].reset();
     recordCommandBuffer(imageIndex);
