@@ -16,6 +16,11 @@ Vulkan rendering engine prototype made with `Vulkan`, meant as an iterative expe
 ## Installation
 This project uses [CMake](https://cmake.org/download/) as a build tool. Since the project is built using `Vulkan`, the [Vulkan SDK](https://vulkan.lunarg.com) is required.
 
+## Quick start 
+```
+cmake -G {YOUR_GENERATOR_HERE} -B build
+```
+
 ## Requirements
 Make sure that your graphics card can support listed Vulkan features (with room for compatibility fallbacks) and make sure you have updated your graphics card driver.
 
