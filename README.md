@@ -1,6 +1,9 @@
 # About
 Vulkan rendering engine prototype made with `Vulkan`, meant as an iterative experimental sandbox to learn best practices for Vulkan, engine architecture and low-level graphics programming. Code is forked with significant changes from a [Khronos Group Vulkan tutorial](https://github.com/KhronosGroup/Vulkan-Tutorial). Project is written for the `C++20` standard and is meant to be cross-platform. Currently, the code is tested only on `macOS`, using `XCode` generator but includes tutorial-sourced code that caters to `Windows` and `Linux` systems.
 
+## Screenshots
+![Demo](https://github.com/awhb/Resources/blob/main/Vulkan-Sandbox/vulkan-sandbox-demo.png)
+
 ## Current Features
 * Window handling with with [glfw](https://github.com/glfw/glfw)
 * Vulkan-Hpp RAII bindings for Vulkan resource management
